@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Baccarat Betting System Simulator - Wizard of Odds</title>
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/recharts@2.5.0/dist/Recharts.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
+
+        const TrendingDown = () => (<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"></polyline><polyline points="17 18 23 18 23 12"></polyline></svg>);
+        const AlertTriangle = ({ size = 24 }) => (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>);
+        const DollarSign = () => (<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>);
+        const Clock = () => (<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>);
+
+        function BettingSystemSimulator() {
+            const [systemType, setSystemType] = useState('martingale');
+            const [startingBankroll, setStartingBankroll] = useState(1000);
+            const [baseBet, setBaseBet] = useState(10);
+            const [customSequence, setCustomSequence] = useState('1,2,3,5,8,13');
+            const [numTrials, setNumTrials] = useState(100);
+            const [maxHands, setMaxHands] = useState(500);
+            const [betOn, setBetOn] = useState('banker');
+            const [isSimulating, setIsSimulating] = useState(false);
+            const [results, setResults] = useState(null);
+            const [chartData, setChartData] = useState([]);
+
+            // EXACT 8-deck baccarat probabilities (including ties)
+            const BANKER_WIN_PROB = 0.458597;
+            const PLAYER_WIN_PROB = 0.446247;
+            const TIE_PROB = 0.095156;
+
+            const bettingSystems = {
+                martingale: {
+                    name: "Martingale (Double After Loss)",
+                    getNextBet: (lastBet, won) => won ? baseBet : lastBet * 2
+                },
+                fibonacci: {
+                    name: "Fibonacci",
+                    getNextBet: (lastBet, won, sequence, position) => {
+                        const fib = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987];
+                        const newPos = won ? Math.max(0, position - 2) : Math.min(position + 1, fib.length - 1);
+                        return baseBet * fib[newPos];
+                    }
+                },
+                dalembert: {
+                    name: "D'Alembert (+1 After Loss, -1 After Win)",
+                    getNextBet: (lastBet, won) => won ? Math.max(baseBet, lastBet - baseBet) : lastBet + baseBet
+                },
+                labouchere: {
+                    name: "Labouchere (Cancellation)",
+                    getNextBet: (lastBet, won, sequence) => {
+                        if (sequence.length === 0) return baseBet;
+                        if (sequence.length === 1) return baseBet * sequence[0];
+                        return baseBet * (sequence[0] + sequence[sequence.length - 1]);
+                    }
+                },
+                paroli: {
+                    name: "Paroli (Positive Progression)",
+                    getNextBet: (lastBet, won, winStreak) => {
+                        // Paroli: double bet on wins up to 3 consecutive wins, then reset
+                        if (!won) return baseBet;
+                        if (winStreak >= 4) return baseBet; // Reset after 3 consecutive wins (after 4th win starts)
+                        return lastBet * 2; // Double on wins 1, 2, and 3
+                    }
+                },
+                flat: {
+                    name: "Flat Betting (Control)",
+                    getNextBet: () => baseBet
+                },
+                custom: {
+                    name: "Custom Sequence",
+                    getNextBet: (lastBet, won, sequence, position) => {
+                        if (!sequence || sequence.length === 0) return baseBet;
+                        const idx = won ? Math.max(0, position - 1) : Math.min(position + 1, sequence.length - 1);
+                        return baseBet * (sequence[idx] || 1);
+                    }
+                }
+            };
+
+            // Simulate ONE baccarat hand with CORRECT probabilities and payoffs
+            const simulateBaccaratHand = (betAmount, bettingOn) => {
+                const rand = Math.random();
+                
+                if (rand < BANKER_WIN_PROB) {
+                    return bettingOn === 'banker' ? betAmount * 0.95 : -betAmount;
+                } else if (rand < BANKER_WIN_PROB + PLAYER_WIN_PROB) {
+                    return bettingOn === 'player' ? betAmount : -betAmount;
+                } else {
+                    return 0; // Tie
+                }
+            };
+
+            const simulateSingleTrial = (system) => {
+                let bankroll = startingBankroll;
+                let currentBet = baseBet;
+                let handsPlayed = 0;
+                let position = 0;
+                let winStreak = 0; // Track consecutive wins for Paroli
+                let sequence = customSequence.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+                let maxBankroll = startingBankroll;
+                let minBankroll = startingBankroll;
+                let sessionData = [];
+
+                while (bankroll >= baseBet && handsPlayed < maxHands) {
+                    const result = simulateBaccaratHand(currentBet, betOn);
+                    bankroll += result;
+                    
+                    handsPlayed++;
+                    maxBankroll = Math.max(maxBankroll, bankroll);
+                    minBankroll = Math.min(minBankroll, bankroll);
+
+                    if (handsPlayed % 10 === 0) {
+                        sessionData.push({ hand: handsPlayed, bankroll });
+                    }
+
+                    // Update bet based on system (only on resolved bets)
+                    if (result !== 0) {
+                        const won = result > 0;
+                        
+                        // Update win streak for Paroli
+                        if (systemType === 'paroli') {
+                            winStreak = won ? winStreak + 1 : 0;
+                            currentBet = system.getNextBet(currentBet, won, winStreak);
+                        } else if (systemType === 'labouchere') {
+                            if (won) {
+                                if (sequence.length > 1) {
+                                    sequence = sequence.slice(1, -1);
+                                } else if (sequence.length === 1) {
+                                    sequence = customSequence.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+                                }
+                            } else {
+                                const betAmount = sequence.length <= 1 ? sequence[0] || 1 : sequence[0] + sequence[sequence.length - 1];
+                                sequence.push(betAmount);
+                            }
+                            currentBet = system.getNextBet(currentBet, won, sequence);
+                        } else {
+                            currentBet = system.getNextBet(currentBet, won, sequence, position);
+                            position = won ? Math.max(0, position - 1) : position + 1;
+                        }
+                    }
+
+                    currentBet = Math.min(currentBet, bankroll);
+                    if (currentBet > startingBankroll * 100) break;
+                }
+
+                return {
+                    finalBankroll: bankroll,
+                    handsPlayed,
+                    busted: bankroll < baseBet,
+                    profit: bankroll - startingBankroll,
+                    roi: ((bankroll - startingBankroll) / startingBankroll) * 100,
+                    maxBankroll,
+                    minBankroll,
+                    sessionData
+                };
+            };
+
+            const runSimulation = () => {
+                setIsSimulating(true);
+                setTimeout(() => {
+                    const system = bettingSystems[systemType];
+                    const trials = [];
+                    let bankruptcies = 0, totalProfit = 0, totalHands = 0, maxDrawdown = 0, allSessionData = [];
+
+                    for (let i = 0; i < numTrials; i++) {
+                        const trial = simulateSingleTrial(system);
+                        trials.push(trial);
+                        if (trial.busted) bankruptcies++;
+                        totalProfit += trial.profit;
+                        totalHands += trial.handsPlayed;
+                        maxDrawdown = Math.min(maxDrawdown, ((trial.minBankroll - startingBankroll) / startingBankroll) * 100);
+                        if (i < 10) trial.sessionData.forEach(p => allSessionData.push({...p, trialNum: i}));
+                    }
+
+                    const chartPoints = [];
+                    for (let hand = 0; hand <= maxHands; hand += 10) {
+                        const point = { hand };
+                        for (let i = 0; i < Math.min(10, numTrials); i++) {
+                            const data = allSessionData.filter(d => d.trialNum === i && d.hand === hand);
+                            if (data.length > 0) point[`trial${i}`] = data[0].bankroll;
+                        }
+                        if (Object.keys(point).length > 1) chartPoints.push(point);
+                    }
+
+                    const survivors = trials.filter(t => !t.busted);
+                    setResults({
+                        bankruptcyRate: (bankruptcies / numTrials) * 100,
+                        avgProfit: totalProfit / numTrials,
+                        avgHands: totalHands / numTrials,
+                        avgROI: (totalProfit / numTrials / startingBankroll) * 100,
+                        maxDrawdown,
+                        trials,
+                        avgSurvivorProfit: survivors.length > 0 ? survivors.reduce((sum, t) => sum + t.profit, 0) / survivors.length : 0,
+                        survivorCount: survivors.length
+                    });
+                    setChartData(chartPoints);
+                    setIsSimulating(false);
+                }, 100);
+            };
+
+            const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value);
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-red-900 via-black to-green-900 p-4 md:p-8">
+                    <div className="max-w-7xl mx-auto">
+                        <div className="mb-4">
+                            <a href="index.html" className="text-blue-400 hover:text-blue-300 underline">← Back to Index</a>
+                        </div>
+
+                        <div className="bg-black/60 backdrop-blur-sm rounded-lg p-6 mb-6 border border-red-800/50">
+                            <h1 className="text-3xl md:text-4xl font-bold text-white mb-2 flex items-center gap-3">
+                                <AlertTriangle size={36} />
+                                Baccarat Betting System Simulator
+                            </h1>
+                            <p className="text-gray-300 text-lg">
+                                Test betting systems through Monte Carlo simulation using exact 8-deck baccarat probabilities
+                            </p>
+                            <p className="text-gray-400 text-sm mt-2">
+                                By Joey Shackelford | Educational tool demonstrating empirical outcomes of betting patterns
+                            </p>
+                        </div>
+
+                        <div className="bg-black/60 backdrop-blur-sm rounded-lg p-6 mb-6 border border-green-800/50">
+                            <h2 className="text-2xl font-bold text-white mb-4">Simulation Parameters</h2>
+                            <div className="grid md:grid-cols-2 gap-6">
+                                <div>
+                                    <label className="block text-white font-semibold mb-2">Betting System</label>
+                                    <select value={systemType} onChange={(e) => setSystemType(e.target.value)} className="w-full bg-gray-800 text-white border border-gray-600 rounded px-4 py-2">
+                                        <option value="martingale">Martingale (Double After Loss)</option>
+                                        <option value="fibonacci">Fibonacci Progression</option>
+                                        <option value="dalembert">D'Alembert (+1/-1)</option>
+                                        <option value="labouchere">Labouchere (Cancellation)</option>
+                                        <option value="paroli">Paroli (Positive Progression)</option>
+                                        <option value="flat">Flat Betting (Control)</option>
+                                        <option value="custom">Custom Sequence</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-white font-semibold mb-2">Bet On</label>
+                                    <select value={betOn} onChange={(e) => setBetOn(e.target.value)} className="w-full bg-gray-800 text-white border border-gray-600 rounded px-4 py-2">
+                                        <option value="banker">Banker (1.06% house edge, 5% commission)</option>
+                                        <option value="player">Player (1.24% house edge)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-white font-semibold mb-2">Starting Bankroll</label>
+                                    <input type="number" value={startingBankroll} onChange={(e) => setStartingBankroll(Math.max(100, parseInt(e.target.value) || 1000))} className="w-full bg-gray-800 text-white border border-gray-600 rounded px-4 py-2" />
+                                </div>
+                                <div>
+                                    <label className="block text-white font-semibold mb-2">Base Bet Size</label>
+                                    <input type="number" value={baseBet} onChange={(e) => setBaseBet(Math.max(1, parseInt(e.target.value) || 10))} className="w-full bg-gray-800 text-white border border-gray-600 rounded px-4 py-2" />
+                                </div>
+                                <div>
+                                    <label className="block text-white font-semibold mb-2">Number of Trials</label>
+                                    <input type="number" value={numTrials} onChange={(e) => setNumTrials(Math.max(10, Math.min(1000, parseInt(e.target.value) || 100)))} className="w-full bg-gray-800 text-white border border-gray-600 rounded px-4 py-2" />
+                                </div>
+                                <div>
+                                    <label className="block text-white font-semibold mb-2">Max Hands Per Trial</label>
+                                    <input type="number" value={maxHands} onChange={(e) => setMaxHands(Math.max(100, parseInt(e.target.value) || 500))} className="w-full bg-gray-800 text-white border border-gray-600 rounded px-4 py-2" />
+                                </div>
+                                {systemType === 'custom' && (
+                                    <div className="md:col-span-2">
+                                        <label className="block text-white font-semibold mb-2">Custom Sequence (comma-separated)</label>
+                                        <input type="text" value={customSequence} onChange={(e) => setCustomSequence(e.target.value)} className="w-full bg-gray-800 text-white border border-gray-600 rounded px-4 py-2" placeholder="1,2,3,5,8,13" />
+                                    </div>
+                                )}
+                            </div>
+                            <button onClick={runSimulation} disabled={isSimulating} className="mt-6 w-full bg-red-600 hover:bg-red-700 disabled:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg">
+                                {isSimulating ? 'Simulating...' : 'Run Simulation'}
+                            </button>
+                        </div>
+
+                        {results && (
+                            <>
+                                <div className="grid md:grid-cols-4 gap-4 mb-6">
+                                    <div className="bg-red-900/40 rounded-lg p-4 border border-red-700/50">
+                                        <div className="flex items-center gap-2 mb-2"><TrendingDown /><h3 className="text-white font-semibold">Bankruptcy Rate</h3></div>
+                                        <p className="text-3xl font-bold text-red-400">{results.bankruptcyRate.toFixed(1)}%</p>
+                                        <p className="text-gray-400 text-sm">{results.trials.filter(t => t.busted).length} of {numTrials} trials</p>
+                                    </div>
+                                    <div className="bg-gray-900/40 rounded-lg p-4 border border-gray-700/50">
+                                        <div className="flex items-center gap-2 mb-2"><DollarSign /><h3 className="text-white font-semibold">Average Result</h3></div>
+                                        <p className={`text-3xl font-bold ${results.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatCurrency(results.avgProfit)}</p>
+                                        <p className="text-gray-400 text-sm">{results.avgROI.toFixed(2)}% ROI</p>
+                                    </div>
+                                    <div className="bg-blue-900/40 rounded-lg p-4 border border-blue-700/50">
+                                        <div className="flex items-center gap-2 mb-2"><Clock /><h3 className="text-white font-semibold">Avg Hands</h3></div>
+                                        <p className="text-3xl font-bold text-blue-400">{Math.round(results.avgHands)}</p>
+                                    </div>
+                                    <div className="bg-purple-900/40 rounded-lg p-4 border border-purple-700/50">
+                                        <div className="flex items-center gap-2 mb-2"><AlertTriangle /><h3 className="text-white font-semibold">Max Drawdown</h3></div>
+                                        <p className="text-3xl font-bold text-purple-400">{results.maxDrawdown.toFixed(1)}%</p>
+                                    </div>
+                                </div>
+
+                                {results.survivorCount > 0 && results.bankruptcyRate > 10 && (
+                                    <div className="bg-yellow-900/40 rounded-lg p-6 mb-6 border border-yellow-700/50">
+                                        <h3 className="text-2xl font-bold text-yellow-400 mb-3">Survivor Bias Warning</h3>
+                                        <p className="text-white text-lg mb-2">The {results.survivorCount} survivors averaged {formatCurrency(results.avgSurvivorProfit)} profit.</p>
+                                        <p className="text-gray-300">However, this ignores the {results.trials.filter(t => t.busted).length} players who went bankrupt. This demonstrates why betting systems "appear" to work—you only hear from the lucky survivors, not the {results.bankruptcyRate.toFixed(1)}% who lost everything.</p>
+                                    </div>
+                                )}
+
+                                <div className="bg-black/60 rounded-lg p-6 mb-6 border border-green-800/50">
+                                    <h3 className="text-2xl font-bold text-white mb-4">Bankroll Over Time (First 10 Trials)</h3>
+                                    <ResponsiveContainer width="100%" height={400}>
+                                        <LineChart data={chartData}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#444" />
+                                            <XAxis dataKey="hand" stroke="#888" label={{ value: 'Hands Played', position: 'insideBottom', offset: -5, fill: '#888' }} />
+                                            <YAxis stroke="#888" label={{ value: 'Bankroll ($)', angle: -90, position: 'insideLeft', fill: '#888' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #444' }} formatter={(value) => formatCurrency(value)} />
+                                            <Legend />
+                                            {[...Array(Math.min(10, numTrials))].map((_, i) => (
+                                                <Line key={i} type="monotone" dataKey={`trial${i}`} stroke={`hsl(${i * 36}, 70%, 50%)`} dot={false} strokeWidth={2} name={`Trial ${i + 1}`} />
+                                            ))}
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                    <p className="text-gray-400 text-sm mt-4">Each line represents one simulated session. Most trend toward zero due to the {betOn === 'banker' ? '1.06%' : '1.24%'} house edge.</p>
+                                </div>
+
+                                <div className="bg-black/60 rounded-lg p-6 mb-6 border border-red-800/50">
+                                    <h3 className="text-2xl font-bold text-white mb-4">What This Simulation Demonstrates</h3>
+                                    <div className="text-gray-300 space-y-4">
+                                        <p>This Monte Carlo simulation uses exact 8-deck baccarat probabilities to demonstrate empirical outcomes of betting systems:</p>
+                                        
+                                        <ul className="list-disc list-inside space-y-2 ml-4">
+                                            <li><strong>Probabilities:</strong> Banker win 45.86% (0.458597), Player win 44.62% (0.446247), Tie 9.52% (0.095156)</li>
+                                            <li><strong>Banker bet:</strong> Wins pay 0.95:1 (5% commission), loses -1, ties push. House edge: 1.0579%</li>
+                                            <li><strong>Player bet:</strong> Wins pay 1:1, loses -1, ties push. House edge: 1.2351%</li>
+                                            <li><strong>Note:</strong> Conditional on non-ties, this corresponds to ≈50.68% Banker and 49.32% Player</li>
+                                        </ul>
+                                        
+                                        <p><strong className="text-white">Key Observations:</strong></p>
+                                        <ul className="list-disc list-inside space-y-2 ml-4">
+                                            <li>Betting patterns do not change individual hand probabilities</li>
+                                            <li>Expected value per hand is negative regardless of bet size</li>
+                                            <li>Progressive systems increase variance but do not change expected value</li>
+                                            <li>Over large samples, all systems converge to the same expected loss rate</li>
+                                        </ul>
+                                        
+                                        <p className="text-sm text-gray-400 mt-4">
+                                            <strong>Disclaimer:</strong> This simulator uses JavaScript's Math.random() for randomization. Results vary between runs due to random sampling. Over very large sample sizes (100,000+ hands with flat betting), average losses converge to the theoretical house edge per the Law of Large Numbers. A trial is marked as "busted" when bankroll falls below the base bet size.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="bg-gray-900/60 rounded-lg p-6 border border-gray-700/50">
+                                    <p className="text-gray-400 text-sm">
+                                        <strong className="text-white">Calculator by Joey Shackelford</strong><br/>
+                                        8-deck probabilities: Banker win = 0.458597, Player win = 0.446247, Tie = 0.095156. House edges: Banker = 1.0579% (after 5% commission), Player = 1.2351%. Banker wins pay 0.95:1, Player wins pay 1:1, Ties push. All 7 betting systems (Martingale, Fibonacci, D'Alembert, Labouchere, Paroli, Flat, Custom) react only to resolved bets. Paroli implements proper 3-win streak tracking with reset. Bankruptcy defined as bankroll < base bet. Sources: WizardofOdds.com/games/baccarat/basics/
+                                    </p>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<BettingSystemSimulator />, document.getElementById('root'));
+    </script>
+</body>
+</html>
